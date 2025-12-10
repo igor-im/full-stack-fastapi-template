@@ -2,7 +2,9 @@ services:
 
   # Local services are available on their ports, but also available on:
   # http://api.localhost.tiangolo.com: backend
+{% if use_frontend %}
   # http://dashboard.localhost.tiangolo.com: frontend
+{% endif %}
   # etc. To enable it, update .env, set:
   # DOMAIN=localhost.tiangolo.com
   proxy:
@@ -91,6 +93,7 @@ services:
     ports:
       - "1080:1080"
       - "1025:1025"
+{% if use_frontend %}
 
   frontend:
     restart: "no"
@@ -126,6 +129,7 @@ services:
       - ./frontend/test-results:/app/test-results
     ports:
       - 9323:9323
+{% endif %}
 
 networks:
   traefik-public:

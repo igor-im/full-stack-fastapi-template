@@ -1,3 +1,8 @@
+use_frontend:
+  type: bool
+  help: Include the React frontend? (Set to false for API-only projects)
+  default: true
+
 project_name:
   type: str
   help: The name of the project, shown to API users (in .env)
@@ -72,7 +77,12 @@ _exclude:
   - htmlcov
   - .cache
   - .venv
-  # Frontend
+  # Frontend (exclude if use_frontend is false)
+  {% if not use_frontend %}
+  - frontend
+  - .github/workflows/playwright.yml
+  - .github/workflows/generate-client.yml
+  {% endif %}
   # Logs
   - logs
   - "*.log"
