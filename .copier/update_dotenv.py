@@ -12,6 +12,9 @@ env_content = env_path.read_text()
 lines = []
 for line in env_content.splitlines():
     for key, value in answers.items():
+        # Skip non-string values (booleans, etc.) as they are Copier options, not .env vars
+        if not isinstance(value, str):
+            continue
         upper_key = key.upper()
         if line.startswith(f"{upper_key}="):
             if " " in value:
