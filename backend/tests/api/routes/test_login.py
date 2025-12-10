@@ -1,118 +1,76 @@
-from unittest.mock import patch
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
-from sqlmodel import Session
 
 from app.core.config import settings
-from app.core.security import verify_password
-from app.crud import create_user
-from app.models import UserCreate
-from app.utils import generate_password_reset_token
-from tests.utils.user import user_authentication_headers
-from tests.utils.utils import random_email, random_lower_string
+from tests.utils.utils import create_test_token, get_superuser_token_headers
 
 
-def test_get_access_token(client: TestClient) -> None:
-    login_data = {
-        "username": settings.FIRST_SUPERUSER,
-        "password": settings.FIRST_SUPERUSER_PASSWORD,
-    }
-    r = client.post(f"{settings.API_V1_STR}/login/access-token", data=login_data)
-    tokens = r.json()
-    assert r.status_code == 200
-    assert "access_token" in tokens
-    assert tokens["access_token"]
-
-
-def test_get_access_token_incorrect_password(client: TestClient) -> None:
-    login_data = {
-        "username": settings.FIRST_SUPERUSER,
-        "password": "incorrect",
-    }
-    r = client.post(f"{settings.API_V1_STR}/login/access-token", data=login_data)
-    assert r.status_code == 400
-
-
-def test_use_access_token(
-    client: TestClient, superuser_token_headers: dict[str, str]
-) -> None:
+def test_verify_token_valid(client: TestClient) -> None:
+    """Test that a valid token returns the token payload."""
+    headers = get_superuser_token_headers()
     r = client.post(
-        f"{settings.API_V1_STR}/login/test-token",
-        headers=superuser_token_headers,
+        f"{settings.API_V1_STR}/login/verify-token",
+        headers=headers,
     )
     result = r.json()
     assert r.status_code == 200
-    assert "email" in result
+    assert result["sub"] == "admin-user-id"
+    assert result["email"] == "admin@example.com"
+    assert "admin" in result["roles"]
+    assert "admin:*" in result["permissions"]
 
 
-def test_recovery_password(
-    client: TestClient, normal_user_token_headers: dict[str, str]
-) -> None:
-    with (
-        patch("app.core.config.settings.SMTP_HOST", "smtp.example.com"),
-        patch("app.core.config.settings.SMTP_USER", "admin@example.com"),
-    ):
-        email = "test@example.com"
-        r = client.post(
-            f"{settings.API_V1_STR}/password-recovery/{email}",
-            headers=normal_user_token_headers,
-        )
-        assert r.status_code == 200
-        assert r.json() == {"message": "Password recovery email sent"}
-
-
-def test_recovery_password_user_not_exits(
-    client: TestClient, normal_user_token_headers: dict[str, str]
-) -> None:
-    email = "jVgQr@example.com"
-    r = client.post(
-        f"{settings.API_V1_STR}/password-recovery/{email}",
-        headers=normal_user_token_headers,
+def test_verify_token_with_permissions(client: TestClient) -> None:
+    """Test that permissions are correctly extracted from token."""
+    token = create_test_token(
+        sub="user-123",
+        email="user@example.com",
+        permissions=["read:items", "write:items"],
+        roles=["user"],
     )
-    assert r.status_code == 404
-
-
-def test_reset_password(client: TestClient, db: Session) -> None:
-    email = random_email()
-    password = random_lower_string()
-    new_password = random_lower_string()
-
-    user_create = UserCreate(
-        email=email,
-        full_name="Test User",
-        password=password,
-        is_active=True,
-        is_superuser=False,
-    )
-    user = create_user(session=db, user_create=user_create)
-    token = generate_password_reset_token(email=email)
-    headers = user_authentication_headers(client=client, email=email, password=password)
-    data = {"new_password": new_password, "token": token}
+    headers = {"Authorization": f"Bearer {token}"}
 
     r = client.post(
-        f"{settings.API_V1_STR}/reset-password/",
+        f"{settings.API_V1_STR}/login/verify-token",
         headers=headers,
-        json=data,
     )
-
+    result = r.json()
     assert r.status_code == 200
-    assert r.json() == {"message": "Password updated successfully"}
+    assert result["sub"] == "user-123"
+    assert "read:items" in result["permissions"]
+    assert "write:items" in result["permissions"]
+    assert "user" in result["roles"]
 
-    db.refresh(user)
-    assert verify_password(new_password, user.hashed_password)
 
-
-def test_reset_password_invalid_token(
-    client: TestClient, superuser_token_headers: dict[str, str]
-) -> None:
-    data = {"new_password": "changethis", "token": "invalid"}
-    r = client.post(
-        f"{settings.API_V1_STR}/reset-password/",
-        headers=superuser_token_headers,
-        json=data,
+def test_verify_token_expired(client: TestClient) -> None:
+    """Test that an expired token returns 401."""
+    token = create_test_token(
+        sub="user-123",
+        expires_delta=timedelta(hours=-1),  # Already expired
     )
-    response = r.json()
+    headers = {"Authorization": f"Bearer {token}"}
 
-    assert "detail" in response
-    assert r.status_code == 400
-    assert response["detail"] == "Invalid token"
+    r = client.post(
+        f"{settings.API_V1_STR}/login/verify-token",
+        headers=headers,
+    )
+    assert r.status_code == 401
+    assert "expired" in r.json()["detail"].lower()
+
+
+def test_verify_token_invalid(client: TestClient) -> None:
+    """Test that an invalid token returns 401."""
+    headers = {"Authorization": "Bearer invalid-token"}
+
+    r = client.post(
+        f"{settings.API_V1_STR}/login/verify-token",
+        headers=headers,
+    )
+    assert r.status_code == 401
+
+
+def test_verify_token_missing(client: TestClient) -> None:
+    """Test that missing token returns 403."""
+    r = client.post(f"{settings.API_V1_STR}/login/verify-token")
+    assert r.status_code == 403

@@ -1,21 +1,18 @@
 from collections.abc import Generator
 from typing import Annotated
 
-import jwt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from pydantic import ValidationError
 from sqlmodel import Session
 
 from app.core import security
-from app.core.config import settings
 from app.core.db import engine
-from app.models import TokenPayload, User
+from app.models import TokenPayload
 
-reusable_oauth2 = OAuth2PasswordBearer(
-    tokenUrl=f"{settings.API_V1_STR}/login/access-token"
-)
+# Use HTTPBearer for external IdP tokens
+bearer_scheme = HTTPBearer(auto_error=True)
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -24,34 +21,117 @@ def get_db() -> Generator[Session, None, None]:
 
 
 SessionDep = Annotated[Session, Depends(get_db)]
-TokenDep = Annotated[str, Depends(reusable_oauth2)]
 
 
-def get_current_user(session: SessionDep, token: TokenDep) -> User:
+def get_token_payload(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> TokenPayload:
+    """
+    Verify JWT token and extract payload with permissions.
+
+    The token is verified using RS256 algorithm against the JWKS from the IdP.
+    Permissions and roles are extracted from the token claims.
+    """
+    token = credentials.credentials
     try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[security.ALGORITHM]
+        payload = security.verify_token(token)
+    except InvalidTokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Could not validate credentials: {e}",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-        token_data = TokenPayload(**payload)
-    except (InvalidTokenError, ValidationError):
+
+    # Extract permissions from common claim locations
+    # Different IdPs use different claim names
+    permissions = (
+        payload.get("permissions")
+        or payload.get("scope", "").split()
+        or payload.get("scp", [])
+        or []
+    )
+    if isinstance(permissions, str):
+        permissions = permissions.split()
+
+    # Extract roles from common claim locations
+    roles = (
+        payload.get("roles")
+        or payload.get("groups")
+        or payload.get("realm_access", {}).get("roles", [])  # Keycloak
+        or payload.get("cognito:groups", [])  # AWS Cognito
+        or []
+    )
+    if isinstance(roles, str):
+        roles = [roles]
+
+    try:
+        token_data = TokenPayload(
+            sub=payload.get("sub", ""),
+            email=payload.get("email"),
+            permissions=permissions,
+            roles=roles,
+        )
+    except ValidationError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return token_data
+
+
+# Dependency for getting the current token payload
+CurrentToken = Annotated[TokenPayload, Depends(get_token_payload)]
+
+
+def require_permission(permission: str):
+    """
+    Dependency factory for requiring a specific permission.
+
+    Usage:
+        @router.get("/admin", dependencies=[Depends(require_permission("admin:read"))])
+    """
+
+    def check_permission(token: CurrentToken) -> TokenPayload:
+        if not token.has_permission(permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required permission: {permission}",
+            )
+        return token
+
+    return check_permission
+
+
+def require_role(role: str):
+    """
+    Dependency factory for requiring a specific role.
+
+    Usage:
+        @router.get("/admin", dependencies=[Depends(require_role("admin"))])
+    """
+
+    def check_role(token: CurrentToken) -> TokenPayload:
+        if not token.has_role(role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required role: {role}",
+            )
+        return token
+
+    return check_role
+
+
+def get_current_admin(token: CurrentToken) -> TokenPayload:
+    """Require admin role/permission."""
+    if not token.is_admin():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Could not validate credentials",
+            detail="Admin privileges required",
         )
-    user = session.get(User, token_data.sub)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return user
+    return token
 
 
-CurrentUser = Annotated[User, Depends(get_current_user)]
-
-
-def get_current_active_superuser(current_user: CurrentUser) -> User:
-    if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=403, detail="The user doesn't have enough privileges"
-        )
-    return current_user
+# Dependency for requiring admin access
+CurrentAdmin = Annotated[TokenPayload, Depends(get_current_admin)]

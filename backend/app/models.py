@@ -97,15 +97,28 @@ class Message(SQLModel):
     message: str
 
 
-# JSON payload containing access token
-class Token(SQLModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
-# Contents of JWT token
+# Contents of JWT token from external IdP
 class TokenPayload(SQLModel):
-    sub: str | None = None
+    sub: str  # Subject (user identifier from IdP)
+    email: str | None = None
+    permissions: list[str] = Field(default_factory=list)  # Permissions/scopes from token
+    roles: list[str] = Field(default_factory=list)  # Roles from token
+
+    def has_permission(self, permission: str) -> bool:
+        """Check if token has a specific permission."""
+        return permission in self.permissions
+
+    def has_role(self, role: str) -> bool:
+        """Check if token has a specific role."""
+        return role in self.roles
+
+    def is_admin(self) -> bool:
+        """Check if token has admin role or permission."""
+        return (
+            "admin" in self.roles
+            or "admin" in self.permissions
+            or self.has_permission("admin:*")
+        )
 
 
 class NewPassword(SQLModel):
